@@ -154,6 +154,15 @@ than being one-off manual steps:
   `addons`, since PSP was removed outright in 1.25. flannel needs no CRDs
   at all, so it sidesteps that version skew; its images were already
   pinned in `system_images`.
+- **metrics-server RBAC**: RKE 1.8.14's bundled `system:metrics-server`
+  ClusterRole grants `nodes/metrics` but not `nodes/stats` -- the resource
+  kubelet's authorization webhook actually checks for the `/stats/summary`
+  endpoint this metrics-server version scrapes, so it crash-loops with
+  `403 Forbidden` until that's added:
+  `kubectl patch clusterrole system:metrics-server --type=json -p='[{"op":"add","path":"/rules/0/resources/-","value":"nodes/stats"}]'`.
+  This is a one-time post-`rke up` step, not something `cluster.yml` can
+  express -- the addon's manifest is baked into the RKE binary -- so it
+  needs re-running after any `rke remove`/fresh `rke up`.
 - **Known non-blocking issue**: the ingress-nginx addon
   (`rancher/nginx-ingress-controller:nginx-0.43.0-rancher1`, also pinned
   to 2021) crash-loops for the same reason the canal job failed --
