@@ -1,0 +1,134 @@
+Docker Threat Modeling
+Given Docker's system components and the STRIDE framework, identify five potential threats that may arise.
+
+1. Docker daemon socket exposure (Elevation of Privilege / Tampering)
+   The Docker daemon socket (/var/run/docker.sock) is root-equivalent: anything
+   that can write to it can launch a new privileged container with the host
+   filesystem bind-mounted in, which is a full host compromise. Any process in
+   the `docker` group, or any container that gets the socket bind-mounted or
+   passed in, can tamper with every other container and escalate straight to
+   root on the host.
+
+2. Unpinned / unverified base image provenance (Tampering / Spoofing)
+   starter/Dockerfile pulls `opensuse/leap:latest` with no digest pin and no
+   signature verification. A mutable tag means the image pulled today is not
+   guaranteed to be the image pulled tomorrow -- a compromised upstream
+   registry or a poisoned tag push can silently swap in a tampered image that
+   spoofs the identity of the trusted base image.
+
+3. Containers running as root inside the container (Elevation of Privilege)
+   Without an explicit non-root USER and without dropped Linux capabilities,
+   a process inside a container that achieves code execution (e.g. via an
+   app vulnerability) runs as root inside the container's namespace, which
+   significantly widens the blast radius of a container-escape bug into a
+   host root compromise.
+
+4. No resource limits on containers (Denial of Service)
+   Without CPU/memory limits (or ulimits) configured, a single compromised or
+   misbehaving container can exhaust host CPU, memory, or PIDs, starving
+   every other container on the same Docker host -- including the Kubernetes
+   control-plane containers that RKE itself runs via Docker on this node.
+
+5. No durable audit trail for container activity (Repudiation / Information
+   Disclosure)
+   The Docker daemon is not configured to forward container/daemon events to
+   a centralized, tamper-evident log. If an attacker executes commands inside
+   a container (e.g. a reverse shell), there is no record that survives
+   container restart/removal to prove what ran or who/what triggered it, and
+   any sensitive data touched during that window is not captured for
+   incident analysis.
+
+Kubernetes Threat Modeling
+Given Kubernetes' system components and the STRIDE framework, identify five potential threats that may arise.
+
+1. etcd stores Secrets unencrypted (Information Disclosure)
+   By default Kubernetes Secrets are stored in etcd as base64 (not
+   encrypted-at-rest), and etcd's client port (2379) is not restricted to the
+   kube-apiserver alone. Anything with network access to that port, or
+   anyone with read access to the etcd data directory/snapshot, can read
+   every Secret in the cluster in plaintext.
+
+2. kube-apiserver anonymous/insecure access (Spoofing / Elevation of
+   Privilege)
+   If anonymous authentication or an insecure (non-TLS, non-RBAC'd) listener
+   is left enabled on the kube-apiserver, a client on the network can send
+   requests without proving its identity, effectively spoofing a legitimate
+   user, and -- depending on the default RBAC bindings -- may be able to
+   list or create cluster resources with no authorization check at all.
+
+3. kubelet API exposed without authn/authz (Tampering / Information
+   Disclosure)
+   The kubelet's API (10250) and legacy read-only port (10255) run on every
+   node, including the single node in this cluster. Without
+   `--anonymous-auth=false` and webhook authorization enforced, anyone who
+   can reach that port on the node network can exec into any pod on the
+   node, pull container logs (which may contain secrets), or retrieve pod
+   specs -- bypassing the kube-apiserver's RBAC entirely.
+
+4. Over-permissioned default ServiceAccount tokens (Elevation of Privilege)
+   Every pod is auto-mounted a ServiceAccount token unless explicitly
+   disabled. If that ServiceAccount (or the `default` one) is bound to an
+   overly broad ClusterRole, a single compromised pod -- such as the
+   intentionally vulnerable Flask app in this project -- can use its own
+   mounted token to call the kube-apiserver and create new privileged pods,
+   read other namespaces' Secrets, or modify cluster resources.
+
+5. Single-node control-plane/etcd/worker co-location (Denial of Service /
+   Elevation of Privilege)
+   This RKE cluster runs controlplane, etcd, and worker roles on one node
+   (see starter/cluster.yml). A workload that escapes its container on this
+   node (e.g. via a privileged pod or a hostPath mount of the Docker socket)
+   lands directly on the same host as etcd and the control-plane containers
+   -- there is no node boundary between "running my application" and
+   "touching the cluster's source of truth." It also means that host going
+   down is a total cluster outage, not just a lost worker.
+
+Docker-bench Run Results and Analysis
+From the failed findings, select and document 3 findings from the Docker-bench results that you want to harden based on the 5 attack surface areas you identified in Step 1. At least 1 of the 3 hardened findings should be different from the ones mentioned in the exercise (i.e. 5.10, 5.14, and 5.22).
+
+Ran `docker/docker-bench-security` against the live openSUSE Leap 15.6 Lima
+node twice: once with `secure-microservices-stack:outofbox` (the original,
+unmodified starter/Dockerfile -- `FROM opensuse/leap:latest`, no USER
+defined) started with a bare `docker run`, and once with
+`secure-microservices-stack:hardened` (starter/Dockerfile +
+starter/docker_run_hardened.sh's flags) started with the hardened flags.
+Screenshots: submissions/suse_docker_environment_out_of_box.png (out of box)
+and submissions/suse_docker_environment_hardened.png (hardened).
+
+Selected findings (2 of 3 different from the 5.10/5.14/5.22 called out in
+the exercise instructions):
+
+1. [WARN] 4.1 - Ensure a user for the container has been created
+   "* Running as root: outofbox-test"
+   Maps to attack surface #3 (Containers running as root inside the
+   container / Elevation of Privilege). The original Dockerfile's
+   `USER $SEC_USER` referenced a variable that was never defined, so the
+   container silently ran as root. Fixed by defining `SEC_USER=appuser`,
+   creating that user/group explicitly, and running with `--user appuser`
+   -- confirmed via `docker inspect --format '{{.Config.User}}'` showing
+   `appuser` on the hardened container, vs empty (root) on the out-of-box
+   one.
+
+2. [WARN] 5.10 - Ensure memory usage for container is limited
+   "* Container running without memory restrictions: outofbox-test"
+   Maps to attack surface #4 (No resource limits on containers / Denial of
+   Service). Fixed with `--memory=256m` in docker_run_hardened.sh --
+   confirmed via `docker inspect` showing a 256 MiB memory limit on the
+   hardened container vs none on the out-of-box one.
+
+3. [WARN] 5.28 - Ensure PIDs cgroup limit is used
+   "* PIDs limit not set: outofbox-test"
+   Also maps to attack surface #4, but covers a different DoS mechanism
+   than 5.10: a fork bomb inside the container can exhaust the host's PID
+   table even with memory/CPU limits in place, since PIDs are a separate
+   cgroup resource. Fixed with `--pids-limit=100` -- confirmed via
+   `docker inspect --format '{{.HostConfig.PidsLimit}}'` showing `100` on
+   the hardened container vs `<nil>` (unlimited) on the out-of-box one.
+
+Score impact: `Checks: 105, Score: 4` out of the box vs a materially
+cleaner per-container posture after hardening on every finding above (the
+overall host-level score barely moves, since most of docker-bench's other
+findings are host/daemon-level checks this project's own container can't
+affect -- see submissions/grype_remediation_notes.txt-style framing: the
+comparison that matters is the 3 findings above, specific to the container
+this project actually builds and runs, not the whole Docker daemon's score).

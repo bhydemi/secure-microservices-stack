@@ -50,7 +50,11 @@ response report.
   a container is *run*, not just how its image is built. This documents the
   hardened `docker run` flags (`--cap-drop=ALL`, `--read-only`,
   `--security-opt=no-new-privileges`, memory/CPU/PID limits, a bounded
-  restart policy) with the runtime weakness each one closes.
+  restart policy) with the runtime weakness each one closes. Actually run
+  against the live Lima node, before and after, with real
+  `docker/docker-bench-security` output — see "Bringing Step 2 up" below and
+  `starter/threat_modeling/threat_modeling_template.txt` for the 3 selected
+  findings and their mapping back to the Docker threat model.
 - `starter/cluster.yml` — merged in the baseline hardening fields from
   `starter/reference_hardened_cluster.yml`: Secrets encryption at rest,
   apiserver audit logging and event rate limiting, a restricted
@@ -61,8 +65,14 @@ response report.
   certificate rotation — while keeping the actual node list, pinned
   `system_images`, and network plugin from the original (functional)
   `cluster.yml`, since the reference file is explicitly non-functional as-is.
+  Kube-bench run against the live cluster both with and without this block
+  applied — see "Bringing Step 2 up" below.
 - `submissions/kube_hardening_test_plan.txt` — the required Kubernetes
   hardening test plan.
+- `starter/threat_modeling/threat_modeling_template.txt` (also copied to
+  `submissions/`) — the STRIDE threat model for both Docker and Kubernetes
+  (5 threats each), plus the Docker-bench findings section filled in from
+  the actual scan below.
 
 ## Flask app hardening + dependency remediation (Step 3)
 
@@ -163,6 +173,55 @@ and this arm64 host.
   signal. Both payloads were detected and contained within seconds of
   this fix.
 
+### Bringing Step 2 up (Docker-bench + Kube-bench)
+
+Both benchmarks were actually run against the live environment, before and
+after hardening, rather than just documented as intended config changes.
+
+- **Docker-bench**: built and ran `secure-microservices-stack:outofbox`
+  (the original, unmodified `starter/Dockerfile` -- mutable `latest` tag,
+  undefined `USER $SEC_USER`) with a bare `docker run`, then
+  `docker/docker-bench-security` against the live Lima node
+  (`submissions/suse_docker_environment_out_of_box.png`, `Checks: 105,
+  Score: 4`). Rebuilt as `secure-microservices-stack:hardened` and started
+  with every flag from `docker_run_hardened.sh`
+  (`submissions/suse_docker_environment_hardened.png`), and confirmed via
+  `docker inspect` that each flag actually took effect (non-root user,
+  `CapDrop: [ALL]`, read-only rootfs, a 256 MiB memory limit, and a 100
+  PIDs limit). The 3 findings selected for
+  `threat_modeling_template.txt` (4.1 running-as-root, 5.10 no memory
+  limit, 5.28 no PIDs limit) all flip from WARN to resolved once the
+  hardened flags are applied -- the two images had to be built and run
+  with QEMU emulation registered (see "Running Step 5" above), since
+  `docker/docker-bench-security`'s own image is amd64-only too.
+- **Kube-bench**: ran `aquasec/kube-bench` with the `rke-cis-1.7` benchmark
+  profile (matching `starter/docs/Rancher_Benchmark_Assessment.pdf`)
+  against the live cluster in its hardened state
+  (`submissions/kube_cluster_hardened.png`, `56 PASS / 2 FAIL / 39 WARN /
+  34 INFO`). To get a genuine "before" baseline without standing up a
+  second cluster, `cluster.yml` was temporarily edited back to the
+  original scaffold's values for every Step-2 hardening field (etcd
+  uid/gid, PSP, secrets encryption, audit log, event rate limit, kubelet
+  flags, serving-cert generation, addons) and re-applied in place with
+  `rke up --config cluster.yml` -- reusing the *same* config filename so
+  RKE reconciles the existing running cluster instead of generating a
+  fresh CA for what it would otherwise treat as a brand new cluster (the
+  first attempt, against a differently-named config file, failed exactly
+  that way: a `tls: bad certificate` error from etcd, caught before any
+  control-plane container was actually touched). Captured the "before"
+  result (`submissions/kube_cluster_out_of_box.png`, `55 PASS / 2 FAIL /
+  40 WARN / 34 INFO`), then restored `cluster.yml` to the real hardened
+  content and ran `rke up` again, which re-encrypted all 69 Secrets at
+  rest and brought every check back to the original hardened numbers.
+  Only one automated check actually differs between the two runs
+  (`1.2.9 EventRateLimit`, PASS vs WARN) -- most of this project's other
+  Step-2 hardening (PSP enforcement, RBAC scope, NetworkPolicy) falls
+  under kube-bench's Section 5 "Kubernetes Policies" checks, which need
+  live API access to verify and are marked Manual/INFO regardless of
+  actual cluster state in this run mode (no kubeconfig was mounted into
+  the kube-bench container); they're reviewed manually in the threat
+  model and test plan instead.
+
 ### Bringing the cluster up on Apple Silicon
 
 `starter/setup_lima_node.sh` provisions the Lima node (see Setup above).
@@ -205,6 +264,18 @@ than being one-off manual steps:
   This is a one-time post-`rke up` step, not something `cluster.yml` can
   express -- the addon's manifest is baked into the RKE binary -- so it
   needs re-running after any `rke remove`/fresh `rke up`.
+- **The Lima SSH port and QEMU emulation don't survive a VM restart**:
+  `cluster.yml`'s `port` field (the `rke` CLI's SSH path to the node) goes
+  stale every time the Lima VM stops and starts again -- Lima picks a new
+  forwarded port on each boot, so `limactl list rke-node1` has to be
+  re-checked and `cluster.yml` updated before any further `rke up` against
+  a VM that was ever stopped. Likewise, the one-time QEMU emulation setup
+  from "Running Step 5" below (`tonistiigi/binfmt --install all`) registers
+  a binfmt_misc handler that does not persist across a VM restart either --
+  it needs re-running any time the VM comes back up and an amd64-only image
+  is needed again. Both of these bit this project directly while capturing
+  the CIS benchmark evidence below, after the VM had been stopped and
+  restarted between sessions.
 - **Known non-blocking issue**: the ingress-nginx addon
   (`rancher/nginx-ingress-controller:nginx-0.43.0-rancher1`, also pinned
   to 2021) crash-loops for the same reason the canal job failed --

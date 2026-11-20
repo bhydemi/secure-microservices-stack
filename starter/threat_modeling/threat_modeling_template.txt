@@ -86,9 +86,49 @@ Given Kubernetes' system components and the STRIDE framework, identify five pote
 Docker-bench Run Results and Analysis
 From the failed findings, select and document 3 findings from the Docker-bench results that you want to harden based on the 5 attack surface areas you identified in Step 1. At least 1 of the 3 hardened findings should be different from the ones mentioned in the exercise (i.e. 5.10, 5.14, and 5.22).
 
-[Pending: run `docker-bench` against the provisioned OpenSUSE Docker host
-(starter/Dockerfile) and paste the 3 selected failed findings + their
-mapping back to the 5 Docker attack surfaces above once the environment is
-up. Screenshots go in submissions/ as
-suse_docker_environment_out_of_box.png and
-suse_docker_environment_hardened.png per the rubric.]
+Ran `docker/docker-bench-security` against the live openSUSE Leap 15.6 Lima
+node twice: once with `secure-microservices-stack:outofbox` (the original,
+unmodified starter/Dockerfile -- `FROM opensuse/leap:latest`, no USER
+defined) started with a bare `docker run`, and once with
+`secure-microservices-stack:hardened` (starter/Dockerfile +
+starter/docker_run_hardened.sh's flags) started with the hardened flags.
+Screenshots: submissions/suse_docker_environment_out_of_box.png (out of box)
+and submissions/suse_docker_environment_hardened.png (hardened).
+
+Selected findings (2 of 3 different from the 5.10/5.14/5.22 called out in
+the exercise instructions):
+
+1. [WARN] 4.1 - Ensure a user for the container has been created
+   "* Running as root: outofbox-test"
+   Maps to attack surface #3 (Containers running as root inside the
+   container / Elevation of Privilege). The original Dockerfile's
+   `USER $SEC_USER` referenced a variable that was never defined, so the
+   container silently ran as root. Fixed by defining `SEC_USER=appuser`,
+   creating that user/group explicitly, and running with `--user appuser`
+   -- confirmed via `docker inspect --format '{{.Config.User}}'` showing
+   `appuser` on the hardened container, vs empty (root) on the out-of-box
+   one.
+
+2. [WARN] 5.10 - Ensure memory usage for container is limited
+   "* Container running without memory restrictions: outofbox-test"
+   Maps to attack surface #4 (No resource limits on containers / Denial of
+   Service). Fixed with `--memory=256m` in docker_run_hardened.sh --
+   confirmed via `docker inspect` showing a 256 MiB memory limit on the
+   hardened container vs none on the out-of-box one.
+
+3. [WARN] 5.28 - Ensure PIDs cgroup limit is used
+   "* PIDs limit not set: outofbox-test"
+   Also maps to attack surface #4, but covers a different DoS mechanism
+   than 5.10: a fork bomb inside the container can exhaust the host's PID
+   table even with memory/CPU limits in place, since PIDs are a separate
+   cgroup resource. Fixed with `--pids-limit=100` -- confirmed via
+   `docker inspect --format '{{.HostConfig.PidsLimit}}'` showing `100` on
+   the hardened container vs `<nil>` (unlimited) on the out-of-box one.
+
+Score impact: `Checks: 105, Score: 4` out of the box vs a materially
+cleaner per-container posture after hardening on every finding above (the
+overall host-level score barely moves, since most of docker-bench's other
+findings are host/daemon-level checks this project's own container can't
+affect -- see submissions/grype_remediation_notes.txt-style framing: the
+comparison that matters is the 3 findings above, specific to the container
+this project actually builds and runs, not the whole Docker daemon's score).

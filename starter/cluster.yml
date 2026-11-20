@@ -18,7 +18,7 @@ nodes:
 # breaks the canal/CNI deploy job (it reaches the apiserver through that
 # same Service IP).
 - address: 127.0.0.1
-  port: "52093"
+  port: "51127"
   internal_address: 192.168.5.15
   role:
   - controlplane
