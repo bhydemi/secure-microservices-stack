@@ -1,0 +1,14 @@
+.python-version
+.idea/
+*.pyc
+__pycache__/
+**/.vagrant
+**/.DS_Store
+cluster.rkestate
+kube_config_cluster.yml
+*.kubeconfig
+.env
+
+# Third-party CIS/Rancher benchmark PDFs are licensed to the course under a
+# separate agreement; kept locally for reference only, not redistributed.
+starter/docs/*.pdf
