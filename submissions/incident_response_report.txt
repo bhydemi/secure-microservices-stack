@@ -1,0 +1,147 @@
+INCIDENT RESPONSE REPORT
+Unauthorized Cryptocurrency Mining Workload on the RKE Cluster
+
+1. Incident commander name:
+Abdulhakeem Omotolani Yaqoob
+
+2. Executive Summary of what happened:
+On 2026-11-20, `starter/scripts/payload.sh` was run against the project's
+RKE cluster to simulate an attacker who has already obtained enough access
+to the cluster (e.g. a leaked kubeconfig, or a compromised pod with a
+service account able to create pods) to deploy workloads directly via
+`kubectl run`. The script deployed three unlabeled pods in the `default`
+namespace -- `moneropool`, `minergate`, and `cryptotonight` -- each
+pulling a public Docker Hub image that builds and runs the `xmrig`
+cryptocurrency-mining binary against a public Monero mining pool.
+
+Two of the three images (`moneropool`, `cryptotonight`) started
+successfully and began mining. Falco's run-time monitoring, configured in
+Step 4 with a custom rule written for exactly this scenario
+(`starter/falco_rules.local.yaml`), detected both pods' outbound
+connection attempts within seconds of each miner process actually trying
+to phone home, and continued firing a CRITICAL alert on every retry. The
+alert flowed through to Prometheus and the imported Grafana "Falco
+Dashboard" (counter metric
+`falcosecurity_falco_rules_matches_total{rule_name="Outbound Connection to
+Known Cryptomining Pool Port"}`) in real time. `cryptotonight` in
+particular reached `pool.supportxmr.com:8100`, a currently-operational
+public Monero pool (unlike `moneropool`'s target, see below) -- both pods
+were terminated immediately on detection, within the same minute the
+alert first fired for each.
+
+The third image, `minergate`, never ran at all -- its Docker Hub image
+repository (`servethehome/monero_cpu_minergate`) has been deleted
+upstream and returns "repository does not exist" on pull. This is a dead
+external artifact, not a detection gap: there was nothing to detect
+because nothing of it ever executed.
+
+3. Summary of what was affected:
+- Namespace: `default` (the cluster's default namespace -- the attacker
+  made no attempt to use a dedicated or disguised namespace).
+- Pods: `moneropool` (image `servethehome/monero_cpu_moneropool:latest`,
+  pod IP 10.42.0.40) and `cryptotonight` (image
+  `servethehome/universal_cryptonight:latest`, pod IP 10.42.0.41), both
+  scheduled onto `node1`, the cluster's single node (this is a
+  single-node cluster, so there was no lateral movement to a second
+  node to observe).
+- No other workload, Secret, or persistent data was touched. The
+  miner pods carried no ServiceAccount token beyond the namespace
+  default and made no API server calls beyond what any pod does by
+  default.
+- `moneropool`'s xmrig process ran with command line:
+  `./xmrig -o stratum+tcp://mine.moneropool.com:80 --nicehash -u
+  45X3YiUzvG1hVo5FrhvGx8gh3d6rjpmHobLKEfVagrKz1uuGuByoHe9WwT5GbtMqc83BXsomR4zLJTBhk88qBxgeRnAeoEs
+  -p x -t 2/2`, attempting outbound connections to 65.108.204.181:80
+  (the IP `mine.moneropool.com` currently resolves to).
+- `cryptotonight`'s xmrig process ran with command line:
+  `./xmrig -o stratum+tcp://pool.supportxmr.com:8100 -u -p x -t 2`,
+  reaching real pool servers at 141.94.96.71, 141.94.96.144, and
+  141.94.96.195:8100 -- this one is a live, currently-operational pool,
+  so this pod was the higher-priority of the two to contain quickly.
+
+4. Summary of the impact:
+- CPU: each xmrig process was configured with `-t 2/2` (2 threads), which
+  on this project's 2-vCPU node is effectively 100% of the node's CPU
+  capacity once both miners are running -- a real resource-exhaustion
+  risk to every other workload on the node (this cluster's own CoreDNS,
+  kubelet, etc.) had this gone undetected for longer.
+- Network/data: `mine.moneropool.com`'s mining pool service itself
+  returned "connection refused" on every attempt -- the pool
+  `moneropool` is hardcoded to use is no longer operational (the
+  moneropool.com service shut down years ago), so that pod never
+  actually mined anything. `cryptotonight`, however, successfully
+  reached `pool.supportxmr.com:8100`, a real, currently-operational
+  public Monero pool, before being terminated within the same minute --
+  given how briefly it ran before containment, and that no wallet
+  address was configured in that pod's command line (`-u` was passed
+  empty), it's very unlikely any share was actually submitted, but this
+  is the pod where "unauthorized compute usage" came closest to becoming
+  "unauthorized compute usage that materially benefited someone."
+- No customer-facing service, data store, or the `vuln_app` was affected;
+  this cluster doesn't run `vuln_app` (it's a separate `docker compose`
+  stack per the README), so there's no cross-contamination to assess.
+
+5. Summary of the remediation steps:
+1. Detected: Falco's `Outbound Connection to Known Cryptomining Pool
+   Port` rule fired a CRITICAL alert for `moneropool` at
+   2026-11-20T15:44:50Z, within seconds of its xmrig binary finishing
+   its build and making its first outbound connection attempt. It fired
+   for `cryptotonight` at 2026-11-20T15:50:55Z, likewise within seconds
+   of that pod's xmrig binary starting.
+2. Confirmed: `kubectl logs`/`ps aux` inside each pod confirmed the
+   process name (`xmrig`), full command line (including `moneropool`'s
+   mining wallet address), and destination pool for each. Cross-checked
+   against `falco-metrics`'s `/metrics` endpoint, which showed the same
+   `falcosecurity_falco_rules_matches_total` counter incrementing live
+   (19 matches by the time containment began), and flowing through to
+   the Prometheus-backed Grafana dashboard.
+3. Contained: terminated both unauthorized pods --
+   `kubectl delete pod moneropool cryptotonight --now` -- within the
+   same minute `cryptotonight`'s connection to the live
+   `pool.supportxmr.com` pool was confirmed, removing the mining
+   workload from the cluster entirely. `minergate` required no
+   containment action since its image never ran (see Executive
+   Summary).
+4. Root cause: the pods were created directly via `kubectl run` using
+   whatever credentials `payload.sh` ran with (in this exercise, the
+   project's own admin kubeconfig, simulating an attacker who had
+   already obtained equivalent access). No cluster vulnerability was
+   exploited to *get* that access -- this exercise starts from the
+   premise that access already exists, and tests whether its abuse gets
+   noticed.
+5. Hardening already in place / reinforced: Falco's custom rule was
+   found during this exercise to have a real gap (see Lessons Learned)
+   and was fixed and redeployed before `payload.sh` was run a second
+   time with the updated rule in place -- the detections above are from
+   the corrected rule, committed in the same change as this report.
+
+6. Summary of lessons learned:
+- Port-list-only network detection has a real blind spot: the custom
+  rule as originally written (`starter/falco_rules.local.yaml`) only
+  matched a fixed list of "well-known" mining ports (3333, 4444, 5555,
+  7777, 9999, 14444, 45560, 45700). The actual payload used port 80 --
+  evading that list entirely, and port 80/443 can't simply be added to
+  it, since that would false-positive on nearly all normal outbound HTTP
+  traffic. The rule now also matches on the `xmrig` process name
+  (confirmed via `ps aux` inside the running container) as a second,
+  independent signal, so detection doesn't depend on the attacker's pool
+  happening to use one of a handful of guessed ports. This is a concrete
+  instance of the general principle that network-only IOCs are easy for
+  an attacker to sidestep and should be paired with a process/behavioral
+  signal wherever possible.
+- Nothing prevented an arbitrary, unlabeled pod from being created
+  directly in the `default` namespace with no resource limits and no
+  owning Deployment/Job -- there's no admission control (e.g. an
+  OPA/Gatekeeper or Kyverno policy, or even a PodSecurityPolicy field
+  restricting image registries) stopping this class of workload from
+  being scheduled in the first place. Detection caught it quickly, but
+  prevention would have stopped it before it ever got CPU time. This is
+  a reasonable follow-up hardening item beyond this project's current
+  scope.
+- Time-to-detect was effectively immediate (seconds) once the payload
+  actually began its network behavior -- the real bottleneck in this
+  exercise was the multi-minute `xmrig` build time inside the container,
+  which is an artifact of these specific 2018-era demo images (they
+  compile from source on every start rather than shipping a binary) and
+  not representative of how fast a real pre-built miner image would
+  start mining.

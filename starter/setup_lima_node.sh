@@ -126,3 +126,11 @@ echo "ssh_key_path: $HOME/.lima/_config/user"
 # by default; cluster.yml's `ignore_docker_version: true` alone isn't
 # enough in this RKE version, so pass the matching CLI flag too:
 #   rke up --config cluster.yml --ignore-docker-version
+
+# --- 8. Step 5 prerequisite: QEMU emulation for payload.sh's images --------
+# Only needed for the incident-response exercise, not for the cluster
+# itself. starter/scripts/payload.sh's demo cryptominer images are all
+# linux/amd64-only -- without emulation registered, they fail outright
+# with "exec format error" on this arm64 node. One-time, persists across
+# container restarts (registers a binfmt_misc handler on the host kernel):
+#   limactl shell "$NODE_NAME" -- sudo docker run --rm --privileged tonistiigi/binfmt --install all

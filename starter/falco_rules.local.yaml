@@ -13,17 +13,30 @@
 - list: mining_pool_ports
   items: [3333, 4444, 5555, 7777, 9999, 14444, 45560, 45700]
 
+# Running this for real against payload.sh's actual images (see the
+# incident response report) showed mine.moneropool.com's pool listening on
+# port 80, not any of the list above -- pools aren't required to use a
+# "standard" mining port, and port 80/443 is a common deliberate evasion
+# of exactly this kind of port-list heuristic. Both demo images run the
+# same `xmrig` binary (confirmed via `ps aux` inside the running
+# container), so this condition also matches on that process name
+# regardless of destination port, as defense in depth against the port
+# list alone.
+- macro: cryptomining_process
+  condition: proc.name in (xmrig)
+
 - rule: Outbound Connection to Known Cryptomining Pool Port
   desc: >
     Detects a process inside a container opening an outbound connection to
-    a port commonly used by cryptocurrency mining pools. Intended to catch
-    the kind of unauthorized crypto-mining workload introduced in this
-    project's incident-response exercise (starter/scripts/payload.sh).
+    a port commonly used by cryptocurrency mining pools, or a known miner
+    binary making any outbound connection. Intended to catch the kind of
+    unauthorized crypto-mining workload introduced in this project's
+    incident-response exercise (starter/scripts/payload.sh).
   condition: >
-    outbound and fd.rport in (mining_pool_ports)
+    outbound and (fd.rport in (mining_pool_ports) or cryptomining_process)
   output: >
-    Outbound connection to a known cryptomining pool port
-    (command=%proc.cmdline connection=%fd.name container=%container.name
-    pod=%k8s.pod.name user=%user.name)
+    Outbound connection to a known cryptomining pool port or by a known
+    miner process (command=%proc.cmdline connection=%fd.name
+    container=%container.name pod=%k8s.pod.name user=%user.name)
   priority: CRITICAL
   tags: [network, mitre_impact, cryptomining]

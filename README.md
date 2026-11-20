@@ -119,11 +119,49 @@ response report.
   flagging outbound connections to well-known cryptocurrency-mining pool
   ports, aimed squarely at the crypto-miner payload used in the incident
   response step. Deliberately excludes port 8080, since that's this
-  project's own vuln_app port.
+  project's own vuln_app port. Also matches on the `xmrig` process name
+  directly, added after actually running the exercise against this
+  cluster surfaced a real gap in the port-only version — see "Running
+  Step 5" below and `submissions/incident_response_report.txt`.
 - `starter/scripts/payload.sh` — removed the `--replicas` flag from each
   `kubectl run`; that flag was removed from `kubectl run` in modern
   kubectl (it only ever creates one Pod now), so the script as originally
   written would fail outright against any current cluster.
+
+### Running Step 5 (incident response) on Apple Silicon
+
+`payload.sh`'s three demo images are all `linux/amd64`-only 2018-era
+builds that compile `xmrig` from source on every start rather than
+shipping a binary. Two problems, same root cause as everywhere else in
+this README: an architecture/age mismatch between old pinned artifacts
+and this arm64 host.
+
+- **QEMU emulation**: without it, both `moneropool` and `cryptotonight`
+  fail immediately with `exec format error` (their binaries are amd64,
+  the node is arm64, and the node has no binfmt_misc emulation
+  registered by default). Fixed with a one-time
+  `docker run --rm --privileged tonistiigi/binfmt --install all` on the
+  node -- after that, both pull and run correctly, just slowly (compiling
+  the full `xmrig` + `argon2`/OpenCL/CUDA backend under x86-on-arm64
+  emulation on a 2-vCPU VM took several minutes each).
+- **`minergate` is permanently gone**: `servethehome/monero_cpu_minergate`
+  returns "repository does not exist" on pull -- the image has been
+  deleted from Docker Hub outright, not an emulation or arch issue. No
+  working substitute was run in its place (random same-named images from
+  unverified Docker Hub accounts are not something to run in a security
+  exercise); `incident_response_report.txt` documents this as a dead
+  upstream artifact rather than a detection gap, since nothing of it ever
+  executed.
+- **The custom rule's port list had a real blind spot**: once
+  `moneropool` actually ran, its pool (`mine.moneropool.com`) turned out
+  to be listening on port 80, not anywhere in the rule's hardcoded port
+  list -- and `cryptotonight` reached a real, currently-live pool
+  (`pool.supportxmr.com:8100`) on a different port again. `port: 80/443`
+  can't just be added to the list (constant false positives on normal
+  HTTP), so the rule now also matches on the `xmrig` process name
+  (confirmed via `ps aux` inside the running container) as an independent
+  signal. Both payloads were detected and contained within seconds of
+  this fix.
 
 ### Bringing the cluster up on Apple Silicon
 
