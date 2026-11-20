@@ -1,0 +1,58 @@
+Kubernetes Hardening Test Plan
+===============================
+
+How will I test the changes?
+
+Before touching cluster.yml, I will capture a baseline: run the full
+vuln_app stack (sqli, postgres, redis) end-to-end on the out-of-the-box RKE
+cluster and confirm the Flask app is reachable on :8080, can read/write to
+Postgres, and can read/write a session value through Redis. I will also
+capture the out-of-the-box Kube-bench results (kube_cluster_out_of_box.png)
+as the "before" snapshot of failed checks.
+
+After applying the hardening changes in starter/cluster.yml (secrets
+encryption at rest, audit logging, event rate limiting, a restricted
+PodSecurityPolicy, disabling automountServiceAccountToken on the default
+ServiceAccount, non-root etcd uid/gid, kubelet TLS cipher suite restriction
+and protect-kernel-defaults, and kubelet server certificate rotation), I
+will tear down and re-provision the cluster with `rke up` against the
+revised config, then:
+
+1. Re-run Kube-bench and diff its output against the baseline -- the number
+   of failed findings must go down, and specifically the 1.1.12 etcd data
+   directory ownership check must now pass.
+2. Re-deploy the exact same vuln_app manifests used in the baseline run
+   with no changes to the application itself, and repeat the same
+   functional checks: the app comes up, serves :8080, and can read/write
+   Postgres and Redis. If the PodSecurityPolicy is too strict (e.g. it
+   blocks a container that needs a capability the app legitimately
+   requires), this step will surface it as a Pod stuck in
+   ContainerCreating/CrashLoopBackOff with a PSP-related event, rather than
+   silently as "the dashboard looks fine."
+3. Confirm the restricted PodSecurityPolicy actually rejects what it's
+   supposed to: attempt to schedule a deliberately non-compliant test pod
+   (e.g. one requesting `privileged: true` or running as root) and confirm
+   the apiserver denies it with a PSP violation message.
+4. Confirm audit logging and event-rate-limiting are active by checking the
+   apiserver's audit log file exists and contains entries for the test
+   actions above, and that the apiserver process came up successfully with
+   the new flags (an apiserver that fails to start due to a bad config
+   value is the most common way "hardening" breaks a cluster).
+
+How will I ensure the changes don't negatively affect the cluster?
+
+The single most important safeguard is sequencing: every check above is
+run on a throwaway single-node Vagrant VM, never against a cluster with
+real data, and a full Kube-bench + functional pass happens immediately
+after each individual change is applied -- not after bundling all of them
+together -- so that if something breaks, the most recently applied setting
+is the first and most likely suspect. If the functional recheck in step 2
+fails, I treat that as a signal to adjust the hardening (e.g. relax the PSP
+rather than drop it, or add the exact capability the app needs back with
+`requiredDropCapabilities` left intact for everything else) rather than
+assume the application is simply broken. Because this is a disposable VM
+provisioned by Vagrant, a hardening change that genuinely breaks the
+cluster is cheap to recover from: `vagrant destroy` and `vagrant up`
+rebuilds the node from scratch in a few minutes, so there is no pressure to
+"make it work" by disabling a security control instead of fixing the
+underlying misconfiguration.

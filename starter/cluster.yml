@@ -45,8 +45,11 @@ services:
     cert: ""
     key: ""
     path: ""
-    uid: 0
-    gid: 0
+    # Run etcd as a dedicated non-root uid/gid rather than root (0:0) --
+    # this is what the CIS Kubernetes Benchmark 1.1.12 "etcd data directory
+    # ownership" check (and kube-bench's corresponding control) verifies.
+    uid: 52034
+    gid: 52034
     snapshot: null
     retention: ""
     creation: ""
@@ -61,15 +64,26 @@ services:
     win_extra_env: []
     service_cluster_ip_range: 10.43.0.0/16
     service_node_port_range: ""
-    pod_security_policy: false
+    # Enforce the restricted PodSecurityPolicy defined in addons below.
+    pod_security_policy: true
     always_pull_images: false
-    secrets_encryption_config: null
-    audit_log: null
+    # Encrypt Secrets at rest in etcd instead of storing them as plain base64.
+    secrets_encryption_config:
+      enabled: true
+      custom_config: null
+    # Keep an audit trail of every request the apiserver handles.
+    audit_log:
+      enabled: true
+      configuration: null
     admission_configuration: null
-    event_rate_limit: null
+    # Protect the apiserver from being overwhelmed by a burst of requests.
+    event_rate_limit:
+      enabled: true
+      configuration: null
   kube-controller:
     image: ""
-    extra_args: {}
+    extra_args:
+      feature-gates: RotateKubeletServerCertificate=true
     extra_binds: []
     extra_env: []
     win_extra_args: {}
@@ -87,7 +101,12 @@ services:
     win_extra_env: []
   kubelet:
     image: ""
-    extra_args: {}
+    extra_args:
+      feature-gates: RotateKubeletServerCertificate=true
+      # Stop a pod from overriding hardened sysctl/kernel defaults on the node.
+      protect-kernel-defaults: "true"
+      # Restrict the kubelet's TLS server to modern, strong cipher suites.
+      tls-cipher-suites: TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_RSA_WITH_AES_256_GCM_SHA384,TLS_RSA_WITH_AES_128_GCM_SHA256
     extra_binds: []
     extra_env: []
     win_extra_args: {}
@@ -97,7 +116,8 @@ services:
     infra_container_image: ""
     cluster_dns_server: 10.43.0.10
     fail_swap_on: false
-    generate_serving_certificate: false
+    # Issue the kubelet its own serving certificate instead of a self-signed one.
+    generate_serving_certificate: true
   kubeproxy:
     image: ""
     extra_args: {}
@@ -117,7 +137,60 @@ authentication:
   strategy: x509
   sans: []
   webhook: null
-addons: ""
+# Baseline hardening addons: a restricted PodSecurityPolicy (no privileged
+# containers, no privilege escalation, must run as non-root), a NetworkPolicy
+# object so the CNI plugin enforces one (left permissive here to avoid
+# breaking inter-service connectivity for this project; tightening it to
+# deny-by-default is a good stand-out improvement), and disabling
+# auto-mounted ServiceAccount tokens for the "default" ServiceAccount so a
+# compromised pod that never asked for API access doesn't get a token handed
+# to it for free.
+addons: |
+  apiVersion: policy/v1beta1
+  kind: PodSecurityPolicy
+  metadata:
+    name: restricted
+  spec:
+    requiredDropCapabilities:
+    - NET_RAW
+    privileged: false
+    allowPrivilegeEscalation: false
+    defaultAllowPrivilegeEscalation: false
+    fsGroup:
+      rule: RunAsAny
+    runAsUser:
+      rule: MustRunAsNonRoot
+    seLinux:
+      rule: RunAsAny
+    supplementalGroups:
+      rule: RunAsAny
+    volumes:
+    - emptyDir
+    - secret
+    - persistentVolumeClaim
+    - downwardAPI
+    - configMap
+    - projected
+  ---
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: default-allow-all
+  spec:
+    podSelector: {}
+    ingress:
+    - {}
+    egress:
+    - {}
+    policyTypes:
+    - Ingress
+    - Egress
+  ---
+  apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: default
+  automountServiceAccountToken: false
 addons_include: []
 system_images:
   etcd: rancher/coreos-etcd:v3.4.14-rancher1

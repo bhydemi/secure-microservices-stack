@@ -39,6 +39,31 @@ response report.
   before/after benchmark screenshots, the hardened `app.py`, the Kubernetes
   test plan, and the incident response report.
 
+## Hardening changes (Step 2)
+
+- `starter/Dockerfile` — pinned the base image to `opensuse/leap:15.6`
+  instead of the mutable `latest` tag, defined and created a dedicated
+  non-root `appuser` (the original `USER $SEC_USER` referenced a variable
+  that was never defined), and cleaned the zypper package cache out of the
+  image layer.
+- `starter/docker_run_hardened.sh` — Docker-bench's runtime checks grade how
+  a container is *run*, not just how its image is built. This documents the
+  hardened `docker run` flags (`--cap-drop=ALL`, `--read-only`,
+  `--security-opt=no-new-privileges`, memory/CPU/PID limits, a bounded
+  restart policy) with the runtime weakness each one closes.
+- `starter/cluster.yml` — merged in the baseline hardening fields from
+  `starter/reference_hardened_cluster.yml`: Secrets encryption at rest,
+  apiserver audit logging and event rate limiting, a restricted
+  PodSecurityPolicy, `automountServiceAccountToken: false` on the default
+  ServiceAccount, a non-root etcd uid/gid (52034:52034 — this is what fixes
+  the Kube-bench 1.1.12 etcd data-directory-ownership check), kubelet TLS
+  cipher suite restriction, `protect-kernel-defaults`, and kubelet serving
+  certificate rotation — while keeping the actual node list, pinned
+  `system_images`, and network plugin from the original (functional)
+  `cluster.yml`, since the reference file is explicitly non-functional as-is.
+- `submissions/kube_hardening_test_plan.txt` — the required Kubernetes
+  hardening test plan.
+
 ## Setup
 
 Requires Docker, Vagrant, and VirtualBox (macOS/Linux host). See
