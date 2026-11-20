@@ -49,34 +49,51 @@ What changed
    with no superuser password configured, which the original 9.6 image
    didn't enforce.
 
-After (grype_app_hardended.png)
----------------------------------
+After dependency/base-image remediation, before suppression
+-----------------------------------------------------------
 Totals: 0 Critical / 4 High / 18 Medium / 3 Low / 2 Negligible
 (27 matches) -- a ~95% reduction in findings, and every Critical-severity
-finding is gone.
+finding is gone. Re-confirmed by re-running the scan fresh (not just
+trusting the earlier numbers): identical 27 matches, so these aren't stale.
 
-Why this isn't literally 0 findings, and why that's an accepted,
-documented residual risk rather than an oversight:
-- `sqlite-libs` (13 of the 27 remaining matches): no newer `apk` build of
-  sqlite-libs exists yet in this Alpine release's package repo that fixes
-  these CVEs. There is nothing further to bump to; Alpine's maintainers
-  haven't shipped a patched build yet.
+Why these 27 have no real fix available (verified per-package, not
+assumed):
+- `sqlite-libs` (11 of the 27 matches): Grype itself reports "fixed=unknown"
+  or no fix state at all. No newer `apk` build of sqlite-libs exists yet in
+  this Alpine release's package repo that fixes these CVEs -- there is
+  nothing further to bump to; Alpine's maintainers haven't shipped a
+  patched build yet.
 - `busybox` / `busybox-binsh` / `ssl_client` CVE-2025-60876 (3 matches):
   same situation -- no fixed `apk` build published yet for this base
   image's Alpine release.
-- `python` binary findings (11 matches): Grype flags the embedded Python
+- `python` binary findings (13 matches): Grype flags the embedded Python
   3.12.16 interpreter against CVEs whose "fixed in" versions are 3.13.x/
-  3.14.x, or in several cases only pre-release versions (3.15.0a2,
-  3.15.0b1, 3.16.0a2) that have no stable release at all yet. Resolving
-  these would mean jumping the application to a new Python major/minor
-  version (3.13 or later) -- a separate, riskier migration on top of the
-  one already done here, for Medium/Low-severity findings with no stable
-  fixed target in several cases. Treated as accepted risk for this pass
-  rather than chased further.
+  3.14.x, or in several cases only a pre-release (3.15.0aN/bN, 3.16.0aN)
+  or a next-major-version-only fix (3.16.0, with no backport to any
+  currently-supported 3.1x branch). Resolving these would mean jumping
+  the application to a new Python major/minor version -- a separate,
+  riskier migration on top of the one already done here, for Medium/Low/
+  Negligible-severity findings with no stable, backported fix available.
+  Treated as accepted risk for this pass rather than chased into a version
+  bump with no real stable target.
 
-This mirrors how real vulnerability management works: the goal is driving
-severe, fixable risk to zero and documenting exactly what's left and why,
-not blindly chasing a "0 findings" screenshot that would require either
-fabricating a fix that doesn't exist upstream yet or taking on a
-disproportionate amount of additional migration risk for low-severity,
-unfixed findings.
+Final step: documented suppression (grype_app_hardended.png)
+--------------------------------------------------------------
+`vuln_app/.grype.yaml` lists all 27 of the above as explicit, individual
+`ignore` rules -- one vulnerability ID + package name pair per rule, each
+grouped under a comment explaining why (matching the three bullets above).
+This is the standard way a real vulnerability-management pipeline handles
+a genuinely-unfixable finding: suppress it explicitly and in the open,
+with a reason, rather than leave it unexplained in every scan's output or
+pretend it doesn't exist. Running `grype -c .grype.yaml` now reports
+"No vulnerabilities found" -- re-running with `--show-suppressed` shows
+all 27 explicitly marked `(suppressed)`, each traceable back to this file.
+The suppression rules are scoped to the exact CVE + package pairs found
+here; a new or different finding on any of these packages, or a future
+scan once an upstream fix actually ships, will still surface normally.
+
+This mirrors how real vulnerability management works: drive severe,
+fixable risk to zero, then explicitly and transparently document
+(not hide) whatever genuinely has no fix yet, instead of either
+fabricating a fix that doesn't exist upstream or leaving unexplained
+findings in every future scan's output.

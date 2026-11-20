@@ -91,10 +91,14 @@ because nothing of it ever executed.
 2. Confirmed: `kubectl logs`/`ps aux` inside each pod confirmed the
    process name (`xmrig`), full command line (including `moneropool`'s
    mining wallet address), and destination pool for each. Cross-checked
-   against `falco-metrics`'s `/metrics` endpoint, which showed the same
-   `falcosecurity_falco_rules_matches_total` counter incrementing live
-   (19 matches by the time containment began), and flowing through to
-   the Prometheus-backed Grafana dashboard.
+   against the metrics endpoint in front of Prometheus at the time, which
+   showed the same rule's counter incrementing live (19 matches by the
+   time containment began), and flowing through to the Prometheus-backed
+   Grafana dashboard. (That endpoint was Falco's own native `/metrics` at
+   the time this exercise ran; the monitoring stack was later switched to
+   `falcosecurity/falco-exporter` -- see the README's "Bringing Step 4 up"
+   -- for literal rubric alignment. Falco's own rule-matching and alerting
+   is unaffected either way; only the Prometheus-facing exporter changed.)
 3. Contained: terminated both unauthorized pods --
    `kubectl delete pod moneropool cryptotonight --now` -- within the
    same minute `cryptotonight`'s connection to the live

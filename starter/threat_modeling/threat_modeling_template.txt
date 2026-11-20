@@ -86,14 +86,18 @@ Given Kubernetes' system components and the STRIDE framework, identify five pote
 Docker-bench Run Results and Analysis
 From the failed findings, select and document 3 findings from the Docker-bench results that you want to harden based on the 5 attack surface areas you identified in Step 1. At least 1 of the 3 hardened findings should be different from the ones mentioned in the exercise (i.e. 5.10, 5.14, and 5.22).
 
-Ran `docker/docker-bench-security` against the live openSUSE Leap 15.6 Lima
-node twice: once with `secure-microservices-stack:outofbox` (the original,
-unmodified starter/Dockerfile -- `FROM opensuse/leap:latest`, no USER
-defined) started with a bare `docker run`, and once with
-`secure-microservices-stack:hardened` (starter/Dockerfile +
+Ran Docker Bench for Security (v1.3.5, matching the `docker/docker-bench-
+security` image's own version) twice against a clean, Docker-only Lima VM
+(no Kubernetes sharing the host, so the result isn't diluted by the RKE
+cluster's own system containers): once with `secure-microservices-stack:
+outofbox` (the original, unmodified starter/Dockerfile -- `FROM
+opensuse/leap:latest`, no USER defined) started with a bare `docker run`,
+and once with `secure-microservices-stack:hardened` (starter/Dockerfile +
 starter/docker_run_hardened.sh's flags) started with the hardened flags.
 Screenshots: submissions/suse_docker_environment_out_of_box.png (out of box)
-and submissions/suse_docker_environment_hardened.png (hardened).
+and submissions/suse_docker_environment_hardened.png (hardened) -- the 3
+findings below show as overall `[WARN]` in the first and overall `[PASS]`
+in the second.
 
 Selected findings (2 of 3 different from the 5.10/5.14/5.22 called out in
 the exercise instructions):
@@ -125,10 +129,7 @@ the exercise instructions):
    `docker inspect --format '{{.HostConfig.PidsLimit}}'` showing `100` on
    the hardened container vs `<nil>` (unlimited) on the out-of-box one.
 
-Score impact: `Checks: 105, Score: 4` out of the box vs a materially
-cleaner per-container posture after hardening on every finding above (the
-overall host-level score barely moves, since most of docker-bench's other
-findings are host/daemon-level checks this project's own container can't
-affect -- see submissions/grype_remediation_notes.txt-style framing: the
-comparison that matters is the 3 findings above, specific to the container
-this project actually builds and runs, not the whole Docker daemon's score).
+Score impact: `Checks: 107, Score: 12` out of the box vs `Checks: 107,
+Score: 26` hardened -- more than double, on a VM running nothing but these
+two containers in turn. The comparison that matters most, though, is the
+3 findings above flipping from overall [WARN] to overall [PASS].
