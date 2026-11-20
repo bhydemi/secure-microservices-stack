@@ -1,0 +1,29 @@
+# Custom Falco rule (optional standout suggestion).
+#
+# Network-based heuristic rather than a specific binary name, since the
+# incident response step's payload.sh can launch any of three different
+# demo cryptominer images (moneropool/minergate/cryptotonight) and their
+# exact process names aren't worth hardcoding -- most CPU coin miners
+# phone home to a mining pool on one of a small set of well-known ports.
+# Deliberately excludes 8080, since that's this project's own vuln_app
+# port and would otherwise be a constant false positive here.
+#
+# Uses the `outbound` macro already defined in Falco's default ruleset
+# (loaded alongside this file), so it isn't redefined here.
+- list: mining_pool_ports
+  items: [3333, 4444, 5555, 7777, 9999, 14444, 45560, 45700]
+
+- rule: Outbound Connection to Known Cryptomining Pool Port
+  desc: >
+    Detects a process inside a container opening an outbound connection to
+    a port commonly used by cryptocurrency mining pools. Intended to catch
+    the kind of unauthorized crypto-mining workload introduced in this
+    project's incident-response exercise (starter/scripts/payload.sh).
+  condition: >
+    outbound and fd.rport in (mining_pool_ports)
+  output: >
+    Outbound connection to a known cryptomining pool port
+    (command=%proc.cmdline connection=%fd.name container=%container.name
+    pod=%k8s.pod.name user=%user.name)
+  priority: CRITICAL
+  tags: [network, mitre_impact, cryptomining]

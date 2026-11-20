@@ -88,6 +88,39 @@ response report.
   with `docker compose up` and real HTTP requests exercising login, CSRF
   enforcement, and session storage — not just a successful `pip install`.
 
+## Run-time monitoring: Falco + Grafana (Step 4)
+
+- `starter/setup_falco_grafana.sh` — the full runbook: kernel headers for
+  the Falco kmod driver on OpenSUSE (`kernel-default-devel`, matched to
+  `uname -r`, with `driver.kind=modern_ebpf` documented as the fallback if
+  that build fails), installing Falco + falco-exporter via Helm,
+  installing `kube-prometheus-stack` for Prometheus + Grafana, triggering
+  a real Falco event (reading `/etc/shadow` inside a pod), and importing
+  the Falco Grafana dashboard
+  ([grafana.com/grafana/dashboards/11914](https://grafana.com/grafana/dashboards/11914),
+  the one the falco-exporter project itself links to). Each screenshot
+  the rubric asks for is called out inline as a "checkpoint" at the point
+  in the script where it's actually available to capture. This step needs
+  a real running RKE cluster and can't be faked — the script is ready to
+  run once the cluster is up.
+- `starter/falco_service_monitor.yaml` — fixed two bugs in the original:
+  its `endpoints` list had `bearerTokenFile`/`port`/`interval` split
+  across three separate one-key list entries instead of one endpoint
+  object (each of which is invalid on its own — `port` is required per
+  endpoint), and set its `release` label to a concrete value
+  (`kube-prometheus-stack`) matching the Helm release name
+  `setup_falco_grafana.sh` actually installs, instead of the placeholder
+  timestamp value it shipped with.
+- `starter/falco_rules.local.yaml` (optional standout) — a custom rule
+  flagging outbound connections to well-known cryptocurrency-mining pool
+  ports, aimed squarely at the crypto-miner payload used in the incident
+  response step. Deliberately excludes port 8080, since that's this
+  project's own vuln_app port.
+- `starter/scripts/payload.sh` — removed the `--replicas` flag from each
+  `kubectl run`; that flag was removed from `kubectl run` in modern
+  kubectl (it only ever creates one Pod now), so the script as originally
+  written would fail outright against any current cluster.
+
 ## Setup
 
 Requires Docker, Vagrant, and VirtualBox (macOS/Linux host). See

@@ -2,14 +2,21 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   labels:
-    release: kube-prometheus-stack-1670613497 # CHANGE THIS VALUE
+    # Must match the Helm release name used for kube-prometheus-stack --
+    # that's the label its Prometheus CR's serviceMonitorSelector looks
+    # for. See starter/setup_falco_grafana.sh, which installs it as
+    # release name "kube-prometheus-stack".
+    release: kube-prometheus-stack
   name: falco-exporter-servicemonitor
   namespace: falco
 spec:
   endpoints:
+    # These three keys belong on a single endpoint object, not three
+    # separate one-key endpoints (the original list here was invalid --
+    # each ServiceMonitor endpoint needs "port" at minimum).
     - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
-    - port: metrics
-    - interval: 5s
+      port: metrics
+      interval: 5s
   namespaceSelector:
     matchNames:
       - falco
