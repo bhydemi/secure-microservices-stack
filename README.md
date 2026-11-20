@@ -121,12 +121,65 @@ response report.
   kubectl (it only ever creates one Pod now), so the script as originally
   written would fail outright against any current cluster.
 
+### Bringing the cluster up on Apple Silicon
+
+`starter/setup_lima_node.sh` provisions the Lima node (see Setup above).
+Getting an actual `rke up` to succeed against it, with a current RKE CLI
+and Docker version, needed a few fixes beyond the Lima substitution itself
+-- all now baked into `starter/cluster.yml` and the Lima script rather
+than being one-off manual steps:
+
+- **cri-dockerd**: modern RKE's hyperkube entrypoint talks to Docker
+  through a CRI shim (`/var/run/cri-dockerd.sock`), which isn't installed
+  by openSUSE's `docker` package. `setup_lima_node.sh` installs it and
+  registers it as a systemd service.
+- **`protect-kernel-defaults`**: this hardening flag (in `cluster.yml`'s
+  kubelet config) makes kubelet refuse to start unless
+  `kernel.panic_on_oops=1`, `kernel.panic=10`, and `vm.overcommit_memory=1`
+  are already set on the node -- `setup_lima_node.sh` installs those via
+  `/etc/sysctl.d`.
+- **`internal_address`**: must be the node's real interface IP (shown by
+  `ip -4 -o addr show` inside the VM), not `127.0.0.1` -- RKE hands it to
+  the apiserver as `--advertise-address`, and a loopback address there
+  makes the apiserver silently drop the `default/kubernetes` Endpoints
+  object, which starves kube-proxy and breaks every addon deploy job that
+  talks to the apiserver through that Service IP (canal/CNI included).
+  `address`/`port` (127.0.0.1 and Lima's forwarded SSH port) stay separate
+  -- those are just how the `rke` CLI on the Mac reaches the node over SSH.
+- **CNI: flannel instead of canal**: this RKE build (1.8.14) bundles
+  current canal/Calico addon manifests whose CRDs use CEL
+  `x-kubernetes-validations` schema rules, which need Kubernetes 1.25+ to
+  even validate -- but this cluster intentionally pins Kubernetes 1.20.4
+  (`system_images` below) to keep the PodSecurityPolicy-based hardening in
+  `addons`, since PSP was removed outright in 1.25. flannel needs no CRDs
+  at all, so it sidesteps that version skew; its images were already
+  pinned in `system_images`.
+- **Known non-blocking issue**: the ingress-nginx addon
+  (`rancher/nginx-ingress-controller:nginx-0.43.0-rancher1`, also pinned
+  to 2021) crash-loops for the same reason the canal job failed --
+  RKE 1.8.14 passes it flags that binary doesn't recognize. Nothing in
+  this project's Falco/Grafana/incident-response steps routes through
+  Ingress (the vuln app is reached directly via `docker compose`), so
+  it's left as-is rather than chasing a third version-skew fix for an
+  unused component.
+
 ## Setup
 
-Requires Docker, Vagrant, and VirtualBox (macOS/Linux host). See
-`starter/Vagrantfile` and `starter/cluster.yml` for the VM and cluster
-definitions, and `vuln_app/README.rst` for running the Flask app directly
-with `docker compose up` (serves on `localhost:8080`).
+Requires Docker. The RKE node is a single VM, provisioned one of two ways:
+
+- **Intel/x86_64 host:** Vagrant + VirtualBox, via `starter/Vagrantfile`.
+- **Apple Silicon host (what this project was actually built and run on):**
+  VirtualBox has no Apple Silicon support at all, so Vagrant/VirtualBox
+  can't run here. `starter/setup_lima_node.sh` boots the same openSUSE
+  Leap 15.6 guest as a native arm64 VM instead, using
+  [Lima](https://lima-vm.io) (Apple's own Virtualization framework, no
+  emulation).
+
+Either way, point `rke up --config starter/cluster.yml` at the resulting
+node's address/user/ssh_key_path (already filled in for the Lima node this
+project uses). See `vuln_app/README.rst` for running the Flask app
+directly with `docker compose up` (serves on `localhost:8080`) --
+independent of the RKE cluster.
 
 ## Submission contents
 

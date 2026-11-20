@@ -1,18 +1,34 @@
 # author: nick.reva@snap.com
 # created April 11, 2021
 nodes:
-- address: 192.168.50.101
-  port: "22"
-  internal_address: 192.168.50.101
+# Apple Silicon has no VirtualBox support at all, so starter/Vagrantfile's
+# VirtualBox provider can't run on this machine. This node is instead a Lima
+# VM (native Apple Virtualization framework, same openSUSE Leap 15.6
+# aarch64 the Vagrantfile targeted) -- see starter/setup_lima_node.sh for
+# how it was brought up. Lima's SSH port is dynamic per-instance; re-check
+# it with `limactl list rke-node1` if this node is ever recreated.
+#
+# address/port are where the `rke` CLI on the Mac reaches the node over SSH
+# (Lima's forwarded loopback port). internal_address is what RKE hands to
+# the apiserver as --advertise-address and to kubelet/kube-proxy for
+# in-cluster traffic -- it has to be the VM's real interface IP (`ip -4 -o
+# addr show` inside the VM), not 127.0.0.1: the apiserver silently drops
+# loopback addresses when building the default/kubernetes Endpoints object,
+# which leaves kube-proxy with no backend to route Service traffic to and
+# breaks the canal/CNI deploy job (it reaches the apiserver through that
+# same Service IP).
+- address: 127.0.0.1
+  port: "52093"
+  internal_address: 192.168.5.15
   role:
   - controlplane
   - etcd
   - worker
   hostname_override: node1
-  user: root
+  user: abdulhakeemoyaqoob
   docker_socket: /var/run/docker.sock
   ssh_key: ""
-  ssh_key_path: ~/.ssh/id_rsa
+  ssh_key_path: /Users/abdulhakeemoyaqoob/.lima/_config/user
   ssh_cert: ""
   ssh_cert_path: ""
   labels: {}
@@ -77,9 +93,18 @@ services:
       configuration: null
     admission_configuration: null
     # Protect the apiserver from being overwhelmed by a burst of requests.
+    # The EventRateLimit admission plugin needs its own Configuration object
+    # here -- "enabled: true" alone doesn't carry defaults in this RKE
+    # version. Limits match the Rancher CIS hardening guide's example.
     event_rate_limit:
       enabled: true
-      configuration: null
+      configuration:
+        apiVersion: eventratelimit.admission.k8s.io/v1alpha1
+        kind: Configuration
+        limits:
+          - type: Server
+            qps: 5000
+            burst: 20000
   kube-controller:
     image: ""
     extra_args:
@@ -127,7 +152,14 @@ services:
     win_extra_binds: []
     win_extra_env: []
 network:
-  plugin: canal
+  # RKE 1.8.14's bundled canal/calico addon manifests use CRD schemas with
+  # CEL x-kubernetes-validations rules, which need Kubernetes 1.25+ to even
+  # validate -- this cluster pins Kubernetes 1.20.4 (system_images below)
+  # to keep the PodSecurityPolicy-based hardening in the addons block,
+  # since PSP was removed outright in 1.25. flannel needs no CRDs at all,
+  # sidestepping that version skew, and its images are already pinned
+  # above (flannel/flannel_cni).
+  plugin: flannel
   options: {}
   mtu: 0
   node_selector: {}
@@ -233,13 +265,16 @@ system_images:
   aci_controller_container: noiro/aci-containers-controller:5.1.1.0.1ae238a
   aci_gbp_server_container: noiro/gbp-server:5.1.1.0.1ae238a
   aci_opflex_server_container: noiro/opflex-server:5.1.1.0.1ae238a
-ssh_key_path: ~/.ssh/id_rsa
+ssh_key_path: /Users/abdulhakeemoyaqoob/.lima/_config/user
 ssh_cert_path: ""
 ssh_agent_auth: false
 authorization:
   mode: rbac
   options: {}
-ignore_docker_version: null
+# openSUSE Leap 15.6's zypper repo ships Docker 28.5.1-ce, newer than this
+# RKE build's hardcoded allowlist (up to 28.3.x) -- the engine itself works
+# fine, RKE just doesn't recognize the version string yet.
+ignore_docker_version: true
 kubernetes_version: ""
 private_registries: []
 ingress:
