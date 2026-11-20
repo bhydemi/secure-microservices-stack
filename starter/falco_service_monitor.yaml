@@ -7,20 +7,28 @@ metadata:
     # for. See starter/setup_falco_grafana.sh, which installs it as
     # release name "kube-prometheus-stack".
     release: kube-prometheus-stack
-  name: falco-exporter-servicemonitor
+  name: falco-servicemonitor
   namespace: falco
 spec:
   endpoints:
     # These three keys belong on a single endpoint object, not three
     # separate one-key endpoints (the original list here was invalid --
-    # each ServiceMonitor endpoint needs "port" at minimum).
-    - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
-      port: metrics
+    # each ServiceMonitor endpoint needs "port" at minimum). No
+    # bearerTokenFile: Falco's own /metrics endpoint (see below) is plain
+    # HTTP with no auth, unlike the falco-exporter endpoint this was
+    # originally written against.
+    - port: metrics
       interval: 5s
   namespaceSelector:
     matchNames:
       - falco
   selector:
+    # Targets the falco-metrics Service (Falco's own built-in Prometheus
+    # endpoint, enabled via --set metrics.enabled=true --set
+    # falco.webserver.prometheus_metrics_enabled=true), not the separate
+    # falco-exporter release -- see the README's "Bringing the cluster up"
+    # section for why.
     matchLabels:
-      app.kubernetes.io/instance: falco-exporter
-      app.kubernetes.io/name: falco-exporter
+      app.kubernetes.io/instance: falco
+      app.kubernetes.io/name: falco
+      type: falco-metrics

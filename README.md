@@ -92,17 +92,18 @@ response report.
 
 - `starter/setup_falco_grafana.sh` — the full runbook: kernel headers for
   the Falco kmod driver on OpenSUSE (`kernel-default-devel`, matched to
-  `uname -r`, with `driver.kind=modern_ebpf` documented as the fallback if
-  that build fails), installing Falco + falco-exporter via Helm,
-  installing `kube-prometheus-stack` for Prometheus + Grafana, triggering
-  a real Falco event (reading `/etc/shadow` inside a pod), and importing
-  the Falco Grafana dashboard
-  ([grafana.com/grafana/dashboards/11914](https://grafana.com/grafana/dashboards/11914),
-  the one the falco-exporter project itself links to). Each screenshot
-  the rubric asks for is called out inline as a "checkpoint" at the point
-  in the script where it's actually available to capture. This step needs
-  a real running RKE cluster and can't be faked — the script is ready to
-  run once the cluster is up.
+  `uname -r`, with `driver.kind=modern_ebpf` as the fallback this cluster
+  actually ended up needing — see below), installing Falco via Helm with
+  its own native Prometheus metrics endpoint, installing
+  `kube-prometheus-stack` for Prometheus + Grafana, triggering a real
+  Falco event (reading `/etc/shadow` inside a pod), and importing the
+  Falco Grafana dashboard
+  ([grafana.com/grafana/dashboards/11914](https://grafana.com/grafana/dashboards/11914)).
+  Each screenshot the rubric asks for is called out inline as a
+  "checkpoint" at the point in the script where it's actually available
+  to capture. This has been run end-to-end against the live cluster
+  (not just written and left untested) — see "Bringing Step 4 up" below
+  for what that actually took.
 - `starter/falco_service_monitor.yaml` — fixed two bugs in the original:
   its `endpoints` list had `bearerTokenFile`/`port`/`interval` split
   across three separate one-key list entries instead of one endpoint
@@ -110,7 +111,10 @@ response report.
   endpoint), and set its `release` label to a concrete value
   (`kube-prometheus-stack`) matching the Helm release name
   `setup_falco_grafana.sh` actually installs, instead of the placeholder
-  timestamp value it shipped with.
+  timestamp value it shipped with. Its `selector` now targets the
+  `falco-metrics` Service (Falco's own built-in metrics endpoint) instead
+  of the separate `falco-exporter` release, and the `bearerTokenFile` is
+  gone entirely — see "Bringing Step 4 up" below for why.
 - `starter/falco_rules.local.yaml` (optional standout) — a custom rule
   flagging outbound connections to well-known cryptocurrency-mining pool
   ports, aimed squarely at the crypto-miner payload used in the incident
@@ -171,6 +175,68 @@ than being one-off manual steps:
   Ingress (the vuln app is reached directly via `docker compose`), so
   it's left as-is rather than chasing a third version-skew fix for an
   unused component.
+
+### Bringing Step 4 up (Falco + Grafana)
+
+Running `setup_falco_grafana.sh` for real against the live cluster surfaced
+three more fixes, on top of the ones above:
+
+- **br_netfilter**: openSUSE Leap's default image doesn't load the
+  `br_netfilter` kernel module, so bridged pod-to-pod traffic through
+  flannel's `cni0` bridge skips iptables NAT in one direction -- a request
+  to a ClusterIP backed by a pod on the *same* node gets DNATed correctly
+  on the way in, but the reply never gets re-NATed back to the Service IP,
+  so the client's kernel sees an unsolicited packet and drops it. On a
+  single-node cluster this breaks every same-node Service call, including
+  kube-dns: pods could resolve a pod IP directly, but every DNS query
+  through the kube-dns Service IP (`10.43.0.10`) timed out -- which is
+  exactly what made Falco's `falcoctl-artifact-install` init container
+  (and the kmod driver-loader before it) fail with `dial tcp: i/o timeout`
+  despite the node itself having working DNS and internet access.
+  `setup_lima_node.sh` now loads the module and sets
+  `net.bridge.bridge-nf-call-iptables=1` (and the ip6tables equivalent) via
+  `/etc/modules-load.d` and `/etc/sysctl.d`.
+- **Falco driver: modern_ebpf, not kmod**: the chart default (`kmod`, a
+  DKMS-built kernel module) fails outright here -- the node's kernel was
+  built with SUSE's gcc 7.5.0, but every gcc in the `falco-driver-loader`
+  image (7/11/12) passes a kernel-build flag
+  (`-fmin-function-alignment=8`) that none of them recognize. That's a
+  toolchain mismatch baked into the image, not something a retry or a
+  flag fixes. `modern_ebpf` (CO-RE eBPF, no headers or compilation,
+  Linux 5.8+ -- this node runs 6.4) is the documented fallback and what
+  `setup_falco_grafana.sh` now installs with.
+- **falco-exporter replaced with Falco's own metrics endpoint**: the
+  original plan was `falcosecurity/falco-exporter`, a sidecar reading
+  Falco's gRPC output socket. It doesn't work with the Falco version this
+  chart installs (0.45.2) -- the falco-exporter chart's own install notes
+  say outright that "Starting from Falco version 0.38, Falco can expose
+  Prometheus metrics directly, eliminating the need for a separate
+  exporter," and this chart version's values no longer have a
+  `grpc`/`grpc_output` section to even turn on, so falco-exporter's gRPC
+  client just hangs forever and the pod never goes Ready.
+  `setup_falco_grafana.sh` instead sets `metrics.enabled=true` and
+  `falco.webserver.prometheus_metrics_enabled=true` on the Falco release
+  itself, which exposes a plain-HTTP, no-auth `/metrics` endpoint on a
+  chart-created `falco-metrics` Service (port 8765) -- what
+  `falco_service_monitor.yaml` now targets. The metric name changed too:
+  `falcosecurity_falco_rules_matches_total` (labeled by `rule_name`)
+  instead of falco-exporter's `falco_events`/`falco_events_total`, which
+  also means the dashboard imported from
+  [grafana.com/grafana/dashboards/11914](https://grafana.com/grafana/dashboards/11914)
+  needs its two panel queries (`Events rate`, `Totals`) rewritten to the
+  new metric name before it shows any data -- it still imports with the
+  old queries and just silently shows nothing otherwise.
+- **kube-prometheus-stack: pin an old chart version, and `--server-side=false`**:
+  the current chart's CRDs hit the exact same CEL `x-kubernetes-validations`
+  problem as canal did -- they need Kubernetes 1.25+ to validate, and this
+  cluster is pinned to 1.20.4. Chart `39.13.3` (Prometheus Operator
+  `0.58.0`, mid-2022) predates CEL in these CRDs and installs cleanly.
+  Separately, Helm 4 defaults to server-side apply, and this apiserver's
+  typed-patch support is too old to compute a merge key for a couple of
+  the chart's Service manifests that omit an explicit `protocol: TCP`
+  (relying on the apiserver's own defaulting, which SSA's structured-merge
+  diff doesn't fall back to here) -- `helm install ... --server-side=false`
+  avoids that by using the older three-way client-side merge instead.
 
 ## Setup
 

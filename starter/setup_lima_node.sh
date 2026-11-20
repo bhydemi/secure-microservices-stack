@@ -80,6 +80,33 @@ limactl copy "$SYSCTL_CONF" "$NODE_NAME:/tmp/99-kubelet-protect-kernel-defaults.
 limactl shell "$NODE_NAME" -- sudo install -m 0644 /tmp/99-kubelet-protect-kernel-defaults.conf /etc/sysctl.d/99-kubelet-protect-kernel-defaults.conf
 limactl shell "$NODE_NAME" -- sudo sysctl --system
 
+# --- 5.5. Fix same-node Service DNAT (br_netfilter) ------------------------
+# openSUSE Leap's default image doesn't load br_netfilter, so bridged
+# pod-to-pod traffic through flannel's cni0 bridge skips iptables NAT in
+# one direction: a request to a ClusterIP backed by a pod on the SAME node
+# gets DNATed correctly on the way in, but the reply never gets re-NATed
+# back to the Service IP, so the client's kernel sees an unsolicited
+# packet and drops it. On a single-node cluster this breaks every
+# same-node Service call, including kube-dns -- pods can resolve a pod IP
+# directly but every DNS query through the kube-dns Service IP (10.43.0.10)
+# times out, which is exactly what made Falco's falcoctl-artifact-install
+# init container (and the driver-loader before it) fail with "dial tcp:
+# i/o timeout" despite the node itself having working DNS and internet
+# access.
+BR_NETFILTER_MODULE="$(mktemp)"
+echo "br_netfilter" > "$BR_NETFILTER_MODULE"
+BR_NETFILTER_SYSCTL="$(mktemp)"
+cat > "$BR_NETFILTER_SYSCTL" <<'EOF'
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+EOF
+limactl copy "$BR_NETFILTER_MODULE" "$NODE_NAME:/tmp/99-br-netfilter.conf"
+limactl copy "$BR_NETFILTER_SYSCTL" "$NODE_NAME:/tmp/99-bridge-nf-call-iptables.conf"
+limactl shell "$NODE_NAME" -- sudo install -m 0644 /tmp/99-br-netfilter.conf /etc/modules-load.d/99-br-netfilter.conf
+limactl shell "$NODE_NAME" -- sudo install -m 0644 /tmp/99-bridge-nf-call-iptables.conf /etc/sysctl.d/99-bridge-nf-call-iptables.conf
+limactl shell "$NODE_NAME" -- sudo modprobe br_netfilter
+limactl shell "$NODE_NAME" -- sudo sysctl --system
+
 # --- 6. Print the connection details cluster.yml needs ---------------------
 # Lima shares one SSH keypair (~/.lima/_config/user) across all instances,
 # and forwards SSH on 127.0.0.1 at a port fixed for this instance's
