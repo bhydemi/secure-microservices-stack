@@ -45,6 +45,7 @@
                 <form class="collection-item valign-wrapper"
                       method="POST"
                       action="/students/{{ student.id }}/evaluate/{{ course.id }}">
+                    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 
                     <a href="/students/{{ student.id }}">{{ student.name }}</a>
                     <div class="input-field inline">

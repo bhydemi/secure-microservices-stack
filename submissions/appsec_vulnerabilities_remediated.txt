@@ -1,0 +1,63 @@
+Flask/aiohttp App (vuln_app) -- AppSec Vulnerabilities Remediated
+===================================================================
+
+1. Cross-Site Scripting (XSS) [required fix]
+   File: vuln_app/sqli/app.py, line 35
+   Before: setup_jinja(..., autoescape=False)
+   After:  setup_jinja(..., autoescape=True)
+   Jinja2 autoescaping was disabled for the entire app, so any
+   user-controlled value rendered in a template -- course review text
+   (course.jinja2), student names (students.jinja2/student.jinja2), course
+   titles/descriptions (courses.jinja2/course.jinja2) -- was emitted as raw
+   HTML. Submitting a review containing "<script>...</script>" would
+   execute for every visitor who viewed that course page (stored XSS). No
+   template relies on unescaped output (no `|safe` filters anywhere in
+   templates/), so flipping this flag on is a safe, minimal fix.
+
+2. SQL Injection
+   File: vuln_app/sqli/dao/student.py, Student.create()
+   Before: q = ("INSERT INTO students (name) "
+                "VALUES ('%(name)s')" % {'name': name})
+           await cur.execute(q)
+   After:  q = 'INSERT INTO students (name) VALUES (%(name)s)'
+           await cur.execute(q, {'name': name})
+   The student name was interpolated directly into the SQL string with
+   Python's `%` operator before the query was ever sent to the database, so
+   a name like `x'); DROP TABLE students; --` would execute as SQL rather
+   than being stored as data. Every other DAO method (Course.create,
+   Review.create, etc.) already passes parameters through aiopg's
+   `cur.execute(query, params)` placeholder binding; this fix brings
+   Student.create in line with that pattern instead of inventing a new one.
+
+3. CSRF protection present in markup but never enforced
+   File: vuln_app/sqli/app.py, lines 8 and 26-29
+   Before: `# csrf_middleware,` (commented out of the middlewares list, and
+           not imported)
+   After:  csrf_middleware imported and included in the middlewares list
+   Every form already rendered a `{{ csrf_token() }}` hidden field, and
+   `csrf_middleware` in middlewares.py already fully implements
+   synchronizer-token validation -- it was simply never wired into the
+   app's middleware chain, so the token was generated and sent but never
+   checked on POST. Enabling it is the fix. One form (the "Evaluate
+   students" form in templates/course.jinja2) was missing the hidden
+   `_csrf_token` field that every other form already had, which would have
+   made that one feature start failing once the middleware was turned on;
+   that field was added to bring it in line with the rest.
+
+4. Weak, unsalted password hashing [extra credit]
+   File: vuln_app/sqli/dao/user.py, User.check_password() / new
+   User.hash_password()
+   Before: self.pwd_hash == md5(password.encode('utf-8')).hexdigest()
+   After:  salted PBKDF2-HMAC-SHA256 (310,000 iterations), stored as
+           "iterations$salt_hex$hash_hex", compared with hmac.compare_digest
+   MD5 is cryptographically broken and, with no per-user salt, two users
+   with the same password get the same hash and the whole users table is
+   one rainbow-table lookup away from being fully cracked. The `==`
+   comparison was also a timing side-channel. The fix switches to a
+   standard salted KDF (stdlib `hashlib.pbkdf2_hmac`, no new dependency)
+   with a constant-time comparison. Since this changes the stored hash
+   format, vuln_app/migrations/001-fixtures.sql was updated to seed the
+   four demo users' pwd_hash values with precomputed hashes in the new
+   format instead of calling Postgres's md5() -- the login passwords
+   themselves (superadmin/superadmin, j.doe/password, s.king/password,
+   p.parker/spidey) are unchanged.

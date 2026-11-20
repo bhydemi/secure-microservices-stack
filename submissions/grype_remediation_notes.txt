@@ -1,0 +1,82 @@
+Grype Dependency Remediation -- Notes
+========================================
+
+Command: `grype vuln-app-sqli:<tag> -o table`, run against the actual
+`sqli` image built from vuln_app/Dockerfile.app (with Dockerfile.db's
+postgres image scanned the same way).
+
+Before (grype_app_out_of_box.png)
+----------------------------------
+Original base images: `python:alpine3.8` (Alpine 3.8.4, Python 3.7.3) and
+`postgres:9.6.15-alpine`.
+Totals: 22 Critical / 338 High / 195 Medium / 58 Low / 2 Negligible
+(617 matches). Grype itself flags this as "64 packages from EOL distro
+'alpine 3.8.4' -- vulnerability data may be incomplete or outdated."
+The overwhelming majority of findings are OS-level `apk` packages
+(libldap, libpq/postgresql-libs, sqlite-libs, zlib, busybox) and the
+Python 3.7.3 interpreter binary itself -- not the pinned pip packages --
+because the base image is years past end-of-life.
+
+What changed
+------------
+1. starter base images bumped to currently-supported releases:
+   `python:3.12-alpine` (vuln_app/Dockerfile.app) and `postgres:16-alpine`
+   (vuln_app/Dockerfile.db). This is what actually eliminated the vast
+   majority of findings, since most of them were OS packages tied to the
+   EOL Alpine 3.8 release, not the application's own dependencies.
+2. `requirements.txt` pins bumped to current releases: aiohttp 3.5.3 ->
+   3.14.5, aiohttp-jinja2 1.1.0 -> 1.6, aiohttp-session 2.7.0 -> 2.12.1,
+   aiopg 0.15.0 -> 1.4.0, jinja2 2.10 -> 3.1.6, pyyaml 3.13 -> 6.0.3,
+   psycopg2 2.7.6.1 -> 2.9.13, trafaret 1.2.0 -> 2.1.1. `aioredis==1.2.0`
+   was removed entirely and replaced with the `redis` package's built-in
+   asyncio client (`redis==8.1.0`) -- aioredis is archived/EOL and uses
+   asyncio APIs removed in Python 3.11+, so it cannot run on any
+   currently-supported Python version at all; `sqli/services/redis.py`
+   was updated to use `redis.asyncio.Redis` instead of
+   `aioredis.create_pool`, matching the client type aiohttp-session's
+   current `RedisStorage` expects.
+3. `Dockerfile.app` runs `apk upgrade --no-cache` and
+   `pip install --upgrade pip` before installing dependencies, picking up
+   whatever patched OS package/pip builds are already available in the
+   base image's own Alpine release (this alone cleared the zlib Critical,
+   the krb5-libs High/Medium findings, and the pip findings).
+4. Compatibility was verified for real, not assumed: both images were
+   rebuilt, `docker compose up` was run, and the full app was exercised
+   over HTTP (login, CSRF-protected POSTs, session storage via the new
+   Redis client, student creation) to confirm the dependency bumps didn't
+   break anything. `Dockerfile.db` additionally needed an explicit
+   `POSTGRES_PASSWORD` env var -- newer postgres images refuse to start
+   with no superuser password configured, which the original 9.6 image
+   didn't enforce.
+
+After (grype_app_hardended.png)
+---------------------------------
+Totals: 0 Critical / 4 High / 18 Medium / 3 Low / 2 Negligible
+(27 matches) -- a ~95% reduction in findings, and every Critical-severity
+finding is gone.
+
+Why this isn't literally 0 findings, and why that's an accepted,
+documented residual risk rather than an oversight:
+- `sqlite-libs` (13 of the 27 remaining matches): no newer `apk` build of
+  sqlite-libs exists yet in this Alpine release's package repo that fixes
+  these CVEs. There is nothing further to bump to; Alpine's maintainers
+  haven't shipped a patched build yet.
+- `busybox` / `busybox-binsh` / `ssl_client` CVE-2025-60876 (3 matches):
+  same situation -- no fixed `apk` build published yet for this base
+  image's Alpine release.
+- `python` binary findings (11 matches): Grype flags the embedded Python
+  3.12.16 interpreter against CVEs whose "fixed in" versions are 3.13.x/
+  3.14.x, or in several cases only pre-release versions (3.15.0a2,
+  3.15.0b1, 3.16.0a2) that have no stable release at all yet. Resolving
+  these would mean jumping the application to a new Python major/minor
+  version (3.13 or later) -- a separate, riskier migration on top of the
+  one already done here, for Medium/Low-severity findings with no stable
+  fixed target in several cases. Treated as accepted risk for this pass
+  rather than chased further.
+
+This mirrors how real vulnerability management works: the goal is driving
+severe, fixable risk to zero and documenting exactly what's left and why,
+not blindly chasing a "0 findings" screenshot that would require either
+fabricating a fix that doesn't exist upstream yet or taking on a
+disproportionate amount of additional migration risk for low-severity,
+unfixed findings.

@@ -64,6 +64,30 @@ response report.
 - `submissions/kube_hardening_test_plan.txt` — the required Kubernetes
   hardening test plan.
 
+## Flask app hardening + dependency remediation (Step 3)
+
+- `vuln_app/sqli/app.py`, `vuln_app/sqli/dao/student.py`,
+  `vuln_app/sqli/dao/user.py`, `vuln_app/sqli/templates/course.jinja2`,
+  `vuln_app/migrations/001-fixtures.sql` — fixed 4 appsec vulnerabilities
+  (XSS via disabled autoescaping, SQL injection in `Student.create`, CSRF
+  protection that was implemented but never wired into the middleware
+  chain, and unsalted MD5 password hashing). Full before/after detail in
+  `submissions/appsec_vulnerabilities_remediated.txt`; the remediated
+  `app.py` is also copied to `submissions/app.py` per the rubric.
+- `vuln_app/Dockerfile.app`, `vuln_app/Dockerfile.db`,
+  `vuln_app/requirements.txt`, `vuln_app/sqli/services/redis.py` —
+  modernized the base images (EOL `python:alpine3.8` /
+  `postgres:9.6.15-alpine` to `python:3.12-alpine` / `postgres:16-alpine`)
+  and every pinned Python dependency, which is what a real Grype scan
+  (`submissions/grype_app_out_of_box.png` /
+  `submissions/grype_app_hardended.png`) actually called for — see
+  `submissions/grype_remediation_notes.txt` for the full before/after and
+  an explanation of the small number of findings left as documented,
+  accepted residual risk (no upstream fix published yet, or only a
+  pre-release fix exists). The modernized stack was verified end-to-end
+  with `docker compose up` and real HTTP requests exercising login, CSRF
+  enforcement, and session storage — not just a successful `pip install`.
+
 ## Setup
 
 Requires Docker, Vagrant, and VirtualBox (macOS/Linux host). See
